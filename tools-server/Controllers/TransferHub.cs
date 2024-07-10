@@ -45,7 +45,7 @@ public partial class TransferHub : Hub
 
     public async Task<JsonDocument> Connect(string connectionId, JsonDocument offer)
     {
-        return await Clients.Client(connectionId).InvokeAsync<JsonDocument>("Answer", connectionId, offer, Context.ConnectionAborted);
+        return await Clients.Client(connectionId).InvokeAsync<JsonDocument>("Connect", connectionId, offer, Context.ConnectionAborted);
     }
 
     public async Task IceCandidate(string connectionId, JsonDocument candidate)
