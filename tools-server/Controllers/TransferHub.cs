@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using ConcurrentCollections;
 using Microsoft.AspNetCore.SignalR;
@@ -10,37 +11,69 @@ namespace tools_server.Controllers;
 [Logger]
 public partial class TransferHub : Hub
 {
-    private readonly RoomStore _roomStore;
+    private static readonly ConcurrentDictionary<string, Room> _rooms = new();
 
     public override async Task OnConnectedAsync()
     {
+        if (Context.UserIdentifier == null)
+        {
+            _logger.LogError("{ConnectionId} connected without user identifier", Context.ConnectionId);
+            return;
+        }
+
         var ip = Context.GetHttpContext()?.Connection.RemoteIpAddress?.ToString();
         if (ip == null)
         {
+            _logger.LogError("{user} connected without remote ip", Context.UserIdentifier);
             return;
         }
+        var room = _rooms.GetOrAdd(ip, _ => new Room { Name = ip, Users = new ConcurrentHashSet<RoomUser>(new RoomUser()) });
         Context.Items["room"] = ip;
+        if (room.Users.Add(new RoomUser { Id = Context.UserIdentifier, ConnectionId = Context.ConnectionId }))
+        {
+            _logger.LogInformation("{user} connected to {ip}", Context.UserIdentifier, ip);
+        }
+        else
+        {
+            _logger.LogError("{user} already connected to {ip}", Context.UserIdentifier, ip);
+        }
 
-        _logger.LogInformation("{connectionId} connected to {ip}", Context.ConnectionId, ip);
-
-        var connections = _roomStore.Add(ip, Context.ConnectionId);
-        await Clients.Clients(connections).SendAsync("Connections", connections, Context.ConnectionAborted);
+        var connectionIds = room.Users.Select(x => x.ConnectionId).ToList();
+        await Clients.Clients(connectionIds).SendAsync("Connections", room.Users, Context.ConnectionAborted);
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
-        var ip = Context.Items["room"] as string;
-        if (string.IsNullOrEmpty(ip))
+        if (Context.UserIdentifier == null)
         {
+            _logger.LogError("{ConnectionId} disconnected without user identifier", Context.ConnectionId);
             return;
         }
 
-        _roomStore.Remove(ip, Context.ConnectionId);
+        var ip = Context.Items["room"] as string;
+        if (string.IsNullOrEmpty(ip))
+        {
+            _logger.LogError("{user} disconnected without room", Context.ConnectionId);
+            return;
+        }
 
-        var connections = _roomStore.GetConnections(ip);
-        await Clients.Clients(connections).SendAsync("Connections", connections);
+        if (!_rooms.TryGetValue(ip, out var room))
+        {
+            _logger.LogError("{user} Room {ip} not found", Context.UserIdentifier, ip);
+            return;
+        }
 
-        _logger.LogInformation("{connectionId} disconnected to {ip}", Context.ConnectionId, ip);
+        if (room.Users.TryRemove(new RoomUser { Id = Context.UserIdentifier }))
+        {
+            _logger.LogInformation("{user} disconnected to {ip}", Context.UserIdentifier, ip);
+        }
+        else
+        {
+            _logger.LogError("{user} already disconnected to {ip}", Context.UserIdentifier, ip);
+        }
+
+        var connections = room.Users.Select(x => x.ConnectionId).ToList();
+        await Clients.Clients(connections).SendAsync("Connections", room.Users);
     }
 
     public async Task<JsonDocument> Connect(string connectionId, JsonDocument offer)
@@ -54,30 +87,34 @@ public partial class TransferHub : Hub
     }
 }
 
-public class RoomStore
+public class Room
 {
-    private readonly ConcurrentDictionary<string, ConcurrentHashSet<string>> _rooms = new();
+    public string Name { get; set; }
+    public ConcurrentHashSet<RoomUser> Users { get; set; }
+}
 
-    public ConcurrentHashSet<string> Add(string room, string connectionId)
+public class RoomUser : IEqualityComparer<RoomUser>
+{
+    public string Id { get; set; }
+    public string ConnectionId { get; set; }
+
+    public bool Equals(RoomUser? x, RoomUser? y)
     {
-        return _rooms.AddOrUpdate(room, new ConcurrentHashSet<string> { connectionId }, (_, list) =>
+        if (ReferenceEquals(x, y))
         {
-            list.Add(connectionId);
-            return list;
-        });
+            return true;
+        }
+
+        if (x == null || y == null)
+        {
+            return false;
+        }
+
+        return x.Id == y.Id;
     }
 
-    public ConcurrentHashSet<string> Remove(string room, string connectionId)
+    public int GetHashCode([DisallowNull] RoomUser obj)
     {
-        return _rooms.AddOrUpdate(room, new ConcurrentHashSet<string>(), (_, list) =>
-        {
-            list.TryRemove(connectionId);
-            return list;
-        });
-    }
-
-    public ConcurrentHashSet<string> GetConnections(string room)
-    {
-        return _rooms.GetOrAdd(room, _ => new ConcurrentHashSet<string>());
+        return obj.Id.GetHashCode();
     }
 }

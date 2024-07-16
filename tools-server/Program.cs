@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.HttpOverrides;
+using tools_server;
 using tools_server.Controllers;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -10,7 +11,11 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddSignalR();
-builder.Services.AddSingleton<RoomStore>();
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultScheme = SimpleAuthenticationHandler.SchemaName;
+    options.AddScheme<SimpleAuthenticationHandler>(SimpleAuthenticationHandler.SchemaName, null);
+});
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders =
@@ -32,7 +37,6 @@ if (app.Environment.IsDevelopment())
 app.UseForwardedHeaders();
 
 app.UseAuthorization();
-
 app.MapHub<TransferHub>("/api/transfer");
 
 app.Run();
