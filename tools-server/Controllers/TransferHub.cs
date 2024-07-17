@@ -76,14 +76,40 @@ public partial class TransferHub : Hub
         await Clients.Clients(connections).SendAsync("Connections", room.Users);
     }
 
-    public async Task<JsonDocument> Connect(string connectionId, JsonDocument offer)
+    public async Task<JsonDocument> Connect(string userId, JsonDocument offer)
     {
-        return await Clients.Client(connectionId).InvokeAsync<JsonDocument>("Connect", connectionId, offer, Context.ConnectionAborted);
+        var connectionId = GetConnectionId(userId);
+
+        return await Clients.Client(connectionId).InvokeAsync<JsonDocument>("Connect", Context.UserIdentifier, offer, Context.ConnectionAborted);
     }
 
-    public async Task IceCandidate(string connectionId, JsonDocument candidate)
+    public async Task IceCandidate(string userId, JsonDocument candidate)
     {
-        await Clients.Client(connectionId).SendAsync("IceCandidate", connectionId, candidate, Context.ConnectionAborted);
+        var connectionId = GetConnectionId(userId);
+
+        await Clients.Client(connectionId).SendAsync("IceCandidate", Context.UserIdentifier, candidate, Context.ConnectionAborted);
+    }
+
+    private string GetConnectionId(string userId)
+    {
+        var ip = Context.Items["room"] as string;
+        if (string.IsNullOrEmpty(ip))
+        {
+            throw new InvalidOperationException("Cannot connect without room");
+        }
+
+        if (!_rooms.TryGetValue(ip, out var room))
+        {
+            throw new InvalidOperationException("Room not found");
+        }
+
+        var user = room.Users.FirstOrDefault(x => x.Id == userId);
+        if (user == null)
+        {
+            throw new InvalidOperationException("User not found");
+        }
+
+        return user.ConnectionId;
     }
 }
 
