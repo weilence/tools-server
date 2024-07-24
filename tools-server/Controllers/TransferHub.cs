@@ -12,68 +12,50 @@ namespace tools_server.Controllers;
 public partial class TransferHub : Hub
 {
     private static readonly ConcurrentDictionary<string, Room> _rooms = new();
+    private static readonly ConcurrentDictionary<string, User> _users = new();
 
     public override async Task OnConnectedAsync()
     {
-        if (Context.UserIdentifier == null)
+        var userId = Context.UserIdentifier;
+        if (userId == null)
         {
-            _logger.LogError("{ConnectionId} connected without user identifier", Context.ConnectionId);
-            return;
+            throw new InvalidOperationException("Cannot connect without user identifier");
         }
 
-        var ip = Context.GetHttpContext()?.Connection.RemoteIpAddress?.ToString();
-        if (ip == null)
+        var roomId = Context.GetHttpContext()?.Connection.RemoteIpAddress?.ToString();
+        if (roomId == null)
         {
-            _logger.LogError("{user} connected without remote ip", Context.UserIdentifier);
-            return;
-        }
-        var room = _rooms.GetOrAdd(ip, _ => new Room { Name = ip, Users = new ConcurrentHashSet<RoomUser>(new RoomUser()) });
-        Context.Items["room"] = ip;
-        if (room.Users.Add(new RoomUser { Id = Context.UserIdentifier, ConnectionId = Context.ConnectionId }))
-        {
-            _logger.LogInformation("{user} connected to {ip}", Context.UserIdentifier, ip);
-        }
-        else
-        {
-            _logger.LogError("{user} already connected to {ip}", Context.UserIdentifier, ip);
+            throw new InvalidOperationException("Cannot connect without remote ip");
         }
 
-        var connectionIds = room.Users.Select(x => x.ConnectionId).ToList();
-        await Clients.Clients(connectionIds).SendAsync("Connections", room.Users, Context.ConnectionAborted);
+        var user = _users.AddOrUpdate(
+            userId,
+            _ => new User { Id = userId, ConnectionId = Context.ConnectionId, RoomIds = [] },
+            (_, user) =>
+            {
+                user.ConnectionId = Context.ConnectionId;
+                return user;
+            }
+        );
+
+        await joinRoom(user, roomId);
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
-        if (Context.UserIdentifier == null)
+        var userId = Context.UserIdentifier;
+        if (userId == null)
         {
-            _logger.LogError("{ConnectionId} disconnected without user identifier", Context.ConnectionId);
-            return;
+            throw new InvalidOperationException("Cannot connect without user identifier");
         }
 
-        var ip = Context.Items["room"] as string;
-        if (string.IsNullOrEmpty(ip))
+        if (_users.TryRemove(userId, out var user))
         {
-            _logger.LogError("{user} disconnected without room", Context.ConnectionId);
-            return;
+            foreach (var roomId in user.RoomIds)
+            {
+                await leaveRoom(user, roomId);
+            }
         }
-
-        if (!_rooms.TryGetValue(ip, out var room))
-        {
-            _logger.LogError("{user} Room {ip} not found", Context.UserIdentifier, ip);
-            return;
-        }
-
-        if (room.Users.TryRemove(new RoomUser { Id = Context.UserIdentifier }))
-        {
-            _logger.LogInformation("{user} disconnected to {ip}", Context.UserIdentifier, ip);
-        }
-        else
-        {
-            _logger.LogError("{user} already disconnected to {ip}", Context.UserIdentifier, ip);
-        }
-
-        var connections = room.Users.Select(x => x.ConnectionId).ToList();
-        await Clients.Clients(connections).SendAsync("Connections", room.Users);
     }
 
     public async Task<JsonDocument> Connect(string userId, JsonDocument offer)
@@ -90,21 +72,79 @@ public partial class TransferHub : Hub
         await Clients.Client(connectionId).SendAsync("IceCandidate", Context.UserIdentifier, candidate, Context.ConnectionAborted);
     }
 
+    public async Task JoinRoom(string roomId)
+    {
+        var userId = Context.UserIdentifier;
+        if (userId == null)
+        {
+            throw new InvalidOperationException("Cannot connect without user identifier");
+        }
+
+        var user = _users[userId];
+        if (user == null)
+        {
+            throw new InvalidOperationException("User not found");
+        }
+
+        await joinRoom(user, roomId);
+    }
+
+    private async Task joinRoom(User user, string roomId)
+    {
+        user.RoomIds.Add(roomId);
+        var room = _rooms.GetOrAdd(roomId, _ => new Room { Name = roomId, UserIds = new ConcurrentHashSet<string>() });
+        room.UserIds.Add(user.Id);
+
+        var users = room.UserIds.Select(x => _users[x]).ToList();
+        var connectionIds = users.Select(x => x.ConnectionId).ToList();
+        var roomInfo = new RoomInfo()
+        {
+            Name = room.Name,
+            Users = users,
+        };
+
+        await Clients.Clients(connectionIds).SendAsync("Connections", roomInfo, Context.ConnectionAborted);
+    }
+
+    public async Task LeaveRoom(string roomId)
+    {
+        var userId = Context.UserIdentifier;
+        if (userId == null)
+        {
+            throw new InvalidOperationException("Cannot connect without user identifier");
+        }
+
+        var user = _users[userId];
+        await leaveRoom(user, roomId);
+    }
+
+    private async Task leaveRoom(User user, string roomId)
+    {
+        if (!_rooms.TryGetValue(roomId, out var room))
+        {
+            _logger.LogError("{user} Room {ip} not found", user.Id, roomId);
+            return;
+        }
+
+        if (!room.UserIds.TryRemove(user.Id))
+        {
+            _logger.LogError("{user} already disconnected to {ip}", user.Id, roomId);
+        }
+
+        var users = room.UserIds.Select(x => _users[x]).ToList();
+        var connectionIds = users.Select(x => x.ConnectionId).ToList();
+        var roomInfo = new RoomInfo()
+        {
+            Name = room.Name,
+            Users = users,
+        };
+
+        await Clients.Clients(connectionIds).SendAsync("Connections", roomInfo);
+    }
+
     private string GetConnectionId(string userId)
     {
-        var ip = Context.Items["room"] as string;
-        if (string.IsNullOrEmpty(ip))
-        {
-            throw new InvalidOperationException("Cannot connect without room");
-        }
-
-        if (!_rooms.TryGetValue(ip, out var room))
-        {
-            throw new InvalidOperationException("Room not found");
-        }
-
-        var user = room.Users.FirstOrDefault(x => x.Id == userId);
-        if (user == null)
+        if (!_users.TryGetValue(userId, out var user))
         {
             throw new InvalidOperationException("User not found");
         }
@@ -116,15 +156,24 @@ public partial class TransferHub : Hub
 public class Room
 {
     public string Name { get; set; }
-    public ConcurrentHashSet<RoomUser> Users { get; set; }
+    public ConcurrentHashSet<string> UserIds { get; set; }
 }
 
-public class RoomUser : IEqualityComparer<RoomUser>
+public class RoomInfo
+{
+
+    public string Name { get; set; }
+    public List<User> Users { get; set; }
+}
+
+public class User : IEqualityComparer<User>
 {
     public string Id { get; set; }
     public string ConnectionId { get; set; }
 
-    public bool Equals(RoomUser? x, RoomUser? y)
+    public ConcurrentHashSet<string> RoomIds { get; set; }
+
+    public bool Equals(User? x, User? y)
     {
         if (ReferenceEquals(x, y))
         {
@@ -139,7 +188,7 @@ public class RoomUser : IEqualityComparer<RoomUser>
         return x.Id == y.Id;
     }
 
-    public int GetHashCode([DisallowNull] RoomUser obj)
+    public int GetHashCode([DisallowNull] User obj)
     {
         return obj.Id.GetHashCode();
     }
