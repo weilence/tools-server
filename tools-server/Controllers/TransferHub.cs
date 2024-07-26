@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using ConcurrentCollections;
 using Microsoft.AspNetCore.SignalR;
 using SourceGenerator.Common;
@@ -38,7 +39,8 @@ public partial class TransferHub : Hub
             }
         );
 
-        await joinRoom(user, roomId);
+        var room = _rooms.GetOrAdd(roomId, _ => new Room { Name = roomId });
+        await joinRoom(user, room);
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)
@@ -72,7 +74,7 @@ public partial class TransferHub : Hub
         await Clients.Client(connectionId).SendAsync("IceCandidate", Context.UserIdentifier, candidate, Context.ConnectionAborted);
     }
 
-    public async Task JoinRoom(string roomId)
+    public async Task JoinRoom(string roomId, string password)
     {
         var userId = Context.UserIdentifier;
         if (userId == null)
@@ -80,19 +82,33 @@ public partial class TransferHub : Hub
             throw new InvalidOperationException("Cannot connect without user identifier");
         }
 
-        var user = _users[userId];
+        var user = _users.GetValueOrDefault(userId);
         if (user == null)
         {
             throw new InvalidOperationException("User not found");
         }
 
-        await joinRoom(user, roomId);
+        if (password == "")
+        {
+            throw new InvalidOperationException("Password is required");
+        }
+
+        var room = _rooms.GetValueOrDefault(roomId);
+        if (room == null)
+        {
+            room = _rooms.GetOrAdd(roomId, _ => new Room { Name = roomId, Password = password });
+        }
+        else if (password != room.Password)
+        {
+            throw new InvalidOperationException("Password is incorrect");
+        }
+
+        await joinRoom(user, room);
     }
 
-    private async Task joinRoom(User user, string roomId)
+    private async Task joinRoom(User user, Room room)
     {
-        user.RoomIds.Add(roomId);
-        var room = _rooms.GetOrAdd(roomId, _ => new Room { Name = roomId, UserIds = new ConcurrentHashSet<string>() });
+        user.RoomIds.Add(room.Name);
         room.UserIds.Add(user.Id);
 
         var users = room.UserIds.Select(x => _users[x]).ToList();
@@ -116,6 +132,11 @@ public partial class TransferHub : Hub
 
         var user = _users[userId];
         await leaveRoom(user, roomId);
+
+        if (user.RoomIds.Count == 0)
+        {
+            _users.Remove(userId, out _);
+        }
     }
 
     private async Task leaveRoom(User user, string roomId)
@@ -129,6 +150,11 @@ public partial class TransferHub : Hub
         if (!room.UserIds.TryRemove(user.Id))
         {
             _logger.LogError("{user} already disconnected to {ip}", user.Id, roomId);
+        }
+
+        if (room.UserIds.Count == 0)
+        {
+            _rooms.TryRemove(roomId, out _);
         }
 
         var users = room.UserIds.Select(x => _users[x]).ToList();
@@ -151,27 +177,44 @@ public partial class TransferHub : Hub
 
         return user.ConnectionId;
     }
+
+    public void AddPassword(string roomId, string password)
+    {
+        if (!_rooms.TryGetValue(roomId, out var room))
+        {
+            throw new InvalidOperationException("Room not found");
+        }
+
+        if (password == "")
+        {
+            throw new InvalidOperationException("Password is required");
+        }
+
+        room.Password = password;
+    }
 }
 
 public class Room
 {
-    public string Name { get; set; }
-    public ConcurrentHashSet<string> UserIds { get; set; }
+    public required string Name { get; set; }
+    [JsonIgnore]
+    public string Password { get; set; } = "";
+    public ConcurrentHashSet<string> UserIds { get; set; } = [];
 }
 
 public class RoomInfo
 {
 
-    public string Name { get; set; }
-    public List<User> Users { get; set; }
+    public required string Name { get; set; }
+    public List<User> Users { get; set; } = [];
 }
 
 public class User : IEqualityComparer<User>
 {
-    public string Id { get; set; }
-    public string ConnectionId { get; set; }
+    public required string Id { get; set; }
+    public required string ConnectionId { get; set; }
 
-    public ConcurrentHashSet<string> RoomIds { get; set; }
+    public ConcurrentHashSet<string> RoomIds { get; set; } = [];
 
     public bool Equals(User? x, User? y)
     {
