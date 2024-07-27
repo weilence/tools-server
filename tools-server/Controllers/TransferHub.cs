@@ -178,7 +178,7 @@ public partial class TransferHub : Hub
         return user.ConnectionId;
     }
 
-    public void AddPassword(string roomId, string password)
+    public void SetPassword(string roomId, string password)
     {
         if (!_rooms.TryGetValue(roomId, out var room))
         {
