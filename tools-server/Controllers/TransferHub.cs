@@ -119,6 +119,7 @@ public partial class TransferHub : Hub
             Users = users,
         };
 
+        _logger.LogDebug("{user} connected to {ip}", user.Id, room.Name);
         await Clients.Clients(connectionIds).SendAsync("Connections", roomInfo, Context.ConnectionAborted);
     }
 
@@ -136,6 +137,7 @@ public partial class TransferHub : Hub
         if (user.RoomIds.Count == 0)
         {
             _users.Remove(userId, out _);
+            _logger.LogDebug("User {user} removed", userId);
         }
     }
 
@@ -155,6 +157,7 @@ public partial class TransferHub : Hub
         if (room.UserIds.Count == 0)
         {
             _rooms.TryRemove(roomId, out _);
+            _logger.LogDebug("Room {ip} removed", roomId);
         }
 
         var users = room.UserIds.Select(x => _users[x]).ToList();
@@ -165,6 +168,7 @@ public partial class TransferHub : Hub
             Users = users,
         };
 
+        _logger.LogDebug("{user} disconnected to {ip}", user.Id, roomId);
         await Clients.Clients(connectionIds).SendAsync("Connections", roomInfo);
     }
 
