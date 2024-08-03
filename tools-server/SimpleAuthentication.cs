@@ -24,7 +24,8 @@ public class SimpleAuthenticationHandler : AuthenticationHandler<AuthenticationS
         var identity = new ClaimsIdentity(new List<Claim>
         {
             new Claim(ClaimTypes.NameIdentifier, uuid),
-        });
+            new Claim(ClaimTypes.Name, uuid),
+        }, SchemaName);
 
         return Task.FromResult(AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name)));
     }

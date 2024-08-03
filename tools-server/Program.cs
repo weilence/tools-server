@@ -1,6 +1,9 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.EntityFrameworkCore;
 using tools_server;
 using tools_server.Controllers;
+using tools_server.Entities;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -14,6 +17,7 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddSignalR();
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddAuthentication(options =>
 {
     options.DefaultScheme = SimpleAuthenticationHandler.SchemaName;
@@ -27,8 +31,17 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
     options.KnownProxies.Clear();
     options.ForwardLimit = null;
 });
+builder.Services.AddAuthorization();
+builder.Services.AddDbContext<ToolsDbContext>(options => options.UseSqlite("Data Source=data.db"));
+builder.Services.AddAutoServices(ServiceLifetime.Scoped);
 
 var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<ToolsDbContext>();
+    db.Database.Migrate();
+}
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
@@ -38,9 +51,10 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseForwardedHeaders();
-
+app.UseAuthentication();
 app.UseAuthorization();
 app.UseLogLevel();
-app.MapHub<TransferHub>("/api/transfer");
+app.MapHub<TransferHub>("/hub/transfer");
+app.MapControllers();
 
 app.Run();
